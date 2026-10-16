@@ -25,6 +25,7 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 const send = (ws, data) => ws.readyState === 1 && ws.send(JSON.stringify(data));
+// broadcast envoie à tous les utilisateurs connectés (sauf `except` si fourni)
 const broadcast = (data, except) =>
   wss.clients.forEach((c) => c !== except && c.name && send(c, data));
 const userList = () => [...wss.clients].filter((c) => c.name).map((c) => c.name);
@@ -45,8 +46,7 @@ wss.on("connection", (ws) => {
       ws.name = name;
       send(ws, { type: "joined", name, history });
       broadcast({ type: "system", text: `${name} a rejoint le chat` }, ws);
-      broadcast({ type: "users", users: userList() });
-      send(ws, { type: "users", users: userList() });
+      broadcast({ type: "users", users: userList() }); // inclut le nouvel arrivant
       return;
     }
 
@@ -60,8 +60,7 @@ wss.on("connection", (ws) => {
       const m = { type: "message", name: ws.name, text, time: now };
       history.push(m);
       if (history.length > HISTORY_MAX) history.shift();
-      broadcast(m);
-      send(ws, m);
+      broadcast(m); // envoie à tout le monde, expéditeur compris (une seule fois)
     }
 
     if (msg.type === "typing") broadcast({ type: "typing", name: ws.name }, ws);
