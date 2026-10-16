@@ -1,6 +1,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const { randomInt } = require("crypto");
 const { WebSocketServer } = require("ws");
 
 const PORT = process.env.PORT || 3000;
@@ -10,6 +11,21 @@ const HISTORY_MAX = 50;
 const history = []; // historique des messages texte (perdu au redémarrage)
 const AUDIO_RE = /^data:audio\/[a-z0-9.+-]+(;[a-z0-9=.+-]+)*;base64,/i;
 const AUDIO_MAX = 1500000; // taille maximale d'un vocal (caractères base64)
+
+// ---------- Jeux ----------
+const games = new Map(); // parties en mémoire
+let gameSeq = 0;
+const GAMES_MAX = 50;
+const LINES = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+const BEATS = { pierre: "ciseaux", feuille: "pierre", ciseaux: "feuille" };
+
+// Ce que les clients ont le droit de voir (les choix pierre/feuille/ciseaux restent secrets)
+const view = (g) => ({
+  id: g.id, kind: g.kind, players: g.players, status: g.status,
+  winner: g.winner, board: g.board, turn: g.turn, line: g.line,
+  picked: g.choices ? g.choices.map((c) => c !== null) : undefined,
+  choices: g.status === "done" && g.choices ? g.choices : undefined,
+});
 
 // Serveur HTTP : sert les fichiers du dossier public/
 const server = http.createServer((req, res) => {
@@ -32,6 +48,13 @@ const broadcast = (data, except) =>
   wss.clients.forEach((c) => c !== except && c.name && send(c, data));
 const userList = () => [...wss.clients].filter((c) => c.name).map((c) => c.name);
 
+function postMessage(name, text) {
+  const m = { type: "message", name, text, time: Date.now() };
+  history.push(m);
+  if (history.length > HISTORY_MAX) history.shift();
+  broadcast(m);
+}
+
 wss.on("connection", (ws) => {
   ws.name = null;
   ws.lastMsg = 0;
@@ -46,7 +69,8 @@ wss.on("connection", (ws) => {
       if (userList().some((n) => n.toLowerCase() === name.toLowerCase()))
         return send(ws, { type: "error", text: "Ce pseudo est déjà utilisé." });
       ws.name = name;
-      send(ws, { type: "joined", name, history });
+      const open = [...games.values()].filter((g) => g.status !== "done").map(view);
+      send(ws, { type: "joined", name, history, games: open });
       broadcast({ type: "system", text: `${name} a rejoint le chat` }, ws);
       broadcast({ type: "users", users: userList() });
       return;
@@ -59,10 +83,7 @@ wss.on("connection", (ws) => {
       const now = Date.now();
       if (!text || now - ws.lastMsg < 300) return; // anti-spam simple
       ws.lastMsg = now;
-      const m = { type: "message", name: ws.name, text, time: now };
-      history.push(m);
-      if (history.length > HISTORY_MAX) history.shift();
-      broadcast(m);
+      postMessage(ws.name, text);
     }
 
     if (msg.type === "voice") {
@@ -74,14 +95,46 @@ wss.on("connection", (ws) => {
       broadcast({ type: "voice", name: ws.name, audio, time: now });
     }
 
-    if (msg.type === "typing") broadcast({ type: "typing", name: ws.name }, ws);
-  });
+    // Dé et pile ou face : résultat tiré par le serveur
+    if (msg.type === "quick") {
+      const now = Date.now();
+      if (now - ws.lastMsg < 300) return;
+      if (msg.kind === "dice") postMessage(ws.name, `🎲 Dé : ${randomInt(1, 7)}`);
+      else if (msg.kind === "coin") postMessage(ws.name, `🪙 Pile ou face : ${randomInt(2) ? "Pile" : "Face"}`);
+      else return;
+      ws.lastMsg = now;
+    }
 
-  ws.on("close", () => {
-    if (!ws.name) return;
-    broadcast({ type: "system", text: `${ws.name} a quitté le chat` });
-    broadcast({ type: "users", users: userList() });
-  });
-});
+    // Nouvelle partie
+    if (msg.type === "game_new") {
+      const now = Date.now();
+      if (!["ttt", "rps"].includes(msg.kind) || now - ws.lastMsg < 300) return;
+      ws.lastMsg = now;
+      const g = { id: ++gameSeq, kind: msg.kind, players: [ws.name, null], status: "waiting", winner: null };
+      if (g.kind === "ttt") { g.board = Array(9).fill(null); g.turn = 0; g.line = null; }
+      else g.choices = [null, null];
+      games.set(g.id, g);
+      if (games.size > GAMES_MAX) games.delete(games.keys().next().value);
+      broadcast({ type: "game", game: view(g) });
+    }
 
-server.listen(PORT, () => console.log(`Chat disponible sur http://localhost:${PORT}`));
+    // Rejoindre une partie
+    if (msg.type === "game_join") {
+      const g = games.get(msg.id);
+      if (!g || g.status !== "waiting" || g.players[0] === ws.name) return;
+      g.players[1] = ws.name;
+      g.status = "playing";
+      broadcast({ type: "game", game: view(g) });
+    }
+
+    // Jouer un coup
+    if (msg.type === "game_move") {
+      const g = games.get(msg.id);
+      if (!g || g.status !== "playing") return;
+      const i = g.players.indexOf(ws.name);
+      if (i < 0) return;
+
+      if (g.kind === "ttt") {
+        const c = msg.move;
+        if (g.turn !== i || !Number.isInteger(c) || c < 0 || c > 8 || g.board[c]) return;
+        g.board[c] = i
