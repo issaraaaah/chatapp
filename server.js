@@ -137,4 +137,31 @@ wss.on("connection", (ws) => {
       if (g.kind === "ttt") {
         const c = msg.move;
         if (g.turn !== i || !Number.isInteger(c) || c < 0 || c > 8 || g.board[c]) return;
-        g.board[c] = i
+            g.board[c] = i === 0 ? "X" : "O";
+                    const line = LINES.find(([a, b, d]) => g.board[a] && g.board[a] === g.board[b] && g.board[a] === g.board[d]);
+        if (line) { g.status = "done"; g.winner = ws.name; g.line = line; }
+        else if (g.board.every(Boolean)) { g.status = "done"; g.winner = "draw"; }
+        else g.turn = 1 - g.turn;
+      } else {
+        if (!Object.hasOwn(BEATS, msg.move) || g.choices[i] !== null) return;
+        g.choices[i] = msg.move;
+        if (g.choices[0] && g.choices[1]) {
+          const [a, b] = g.choices;
+          g.status = "done";
+          g.winner = a === b ? "draw" : BEATS[a] === b ? g.players[0] : g.players[1];
+        }
+      }
+      broadcast({ type: "game", game: view(g) });
+    }
+
+    if (msg.type === "typing") broadcast({ type: "typing", name: ws.name }, ws);
+  });
+
+  ws.on("close", () => {
+    if (!ws.name) return;
+    broadcast({ type: "system", text: `${ws.name} a quitté le chat` });
+    broadcast({ type: "users", users: userList() });
+  });
+});
+
+server.listen(PORT, () => console.log(`Chat disponible sur http://localhost:${PORT}`));
