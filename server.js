@@ -7,7 +7,9 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC = path.join(__dirname, "public");
 const MIME = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript" };
 const HISTORY_MAX = 50;
-const history = []; // historique en mémoire (perdu au redémarrage)
+const history = []; // historique des messages texte (perdu au redémarrage)
+const AUDIO_RE = /^data:audio\/[a-z0-9.+-]+(;[a-z0-9=.+-]+)*;base64,/i;
+const AUDIO_MAX = 1500000; // taille maximale d'un vocal (caractères base64)
 
 // Serveur HTTP : sert les fichiers du dossier public/
 const server = http.createServer((req, res) => {
@@ -21,8 +23,8 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// Serveur WebSocket attaché au même port
-const wss = new WebSocketServer({ server });
+// Serveur WebSocket attaché au même port (messages limités à 2 Mo)
+const wss = new WebSocketServer({ server, maxPayload: 2 * 1024 * 1024 });
 
 const send = (ws, data) => ws.readyState === 1 && ws.send(JSON.stringify(data));
 // broadcast envoie à tous les utilisateurs connectés (sauf `except` si fourni)
@@ -46,7 +48,7 @@ wss.on("connection", (ws) => {
       ws.name = name;
       send(ws, { type: "joined", name, history });
       broadcast({ type: "system", text: `${name} a rejoint le chat` }, ws);
-      broadcast({ type: "users", users: userList() }); // inclut le nouvel arrivant
+      broadcast({ type: "users", users: userList() });
       return;
     }
 
@@ -60,7 +62,16 @@ wss.on("connection", (ws) => {
       const m = { type: "message", name: ws.name, text, time: now };
       history.push(m);
       if (history.length > HISTORY_MAX) history.shift();
-      broadcast(m); // envoie à tout le monde, expéditeur compris (une seule fois)
+      broadcast(m);
+    }
+
+    if (msg.type === "voice") {
+      const audio = String(msg.audio || "");
+      const now = Date.now();
+      if (!AUDIO_RE.test(audio) || audio.length > AUDIO_MAX || now - ws.lastMsg < 300) return;
+      ws.lastMsg = now;
+      // Les vocaux ne sont pas gardés dans l'historique (trop lourds pour la mémoire)
+      broadcast({ type: "voice", name: ws.name, audio, time: now });
     }
 
     if (msg.type === "typing") broadcast({ type: "typing", name: ws.name }, ws);
