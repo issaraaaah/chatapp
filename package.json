@@ -1,0 +1,8 @@
+{
+  "name": "chatapp",
+  "version": "1.0.0",
+  "description": "Chat en temps réel avec Node.js et WebSocket",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}
